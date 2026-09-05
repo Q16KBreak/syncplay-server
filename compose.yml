@@ -1,0 +1,18 @@
+services:
+  syncplay:
+    image: q16kbreak/syncplay-server:latest
+    container_name: syncplay-server
+    restart: unless-stopped
+
+    ports:
+      - 8999:8999
+
+    volumes:
+      - ./data:/var/lib/syncplay
+      # - ./tls:/tls
+
+    environment:
+      SYNCPLAY_PORT: 8999
+      SYNCPLAY_ISOLATE_ROOMS: true      
+      # SYNCPLAY_TLS: "/tls"
+

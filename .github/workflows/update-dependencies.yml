@@ -1,0 +1,94 @@
+name: Update dependencies
+
+on:
+  schedule:
+    - cron: "37 11 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Get latest Python image digest
+        id: python-image
+        run: |
+          echo "==> [1/4] Getting latest Python image digest..."
+
+          DIGEST="$(
+            docker buildx imagetools inspect python:3.14-alpine |
+            awk '/^Digest:/ {print $2; exit}'
+          )"
+
+          if [ -z "$DIGEST" ]; then
+            echo "Failed to get Python image digest."
+            exit 1
+          fi
+
+          PYTHON_IMAGE="python:3.14-alpine@$DIGEST"
+
+          echo "    Python image: $PYTHON_IMAGE"
+          printf '%s\n' "$PYTHON_IMAGE" > python-image.digest
+
+          echo "python_image=$PYTHON_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Generate requirements.lock
+        run: |
+          echo "==> [2/4] Generating requirements.lock..."
+
+          PYTHON_IMAGE="$(cat python-image.digest)"
+
+          docker run --rm \
+            "$PYTHON_IMAGE" \
+            sh -c '
+              wget -qO /tmp/requirements.in \
+                https://github.com/Syncplay/syncplay/raw/refs/heads/master/requirements.txt &&
+              python -m pip install --no-cache-dir pip-tools >/dev/null 2>&1 &&
+              pip-compile \
+                --strip-extras \
+                --quiet \
+                --output-file=- \
+                /tmp/requirements.in
+            ' > requirements.lock
+
+          echo "    requirements.lock generated."
+
+      - name: Check for changes
+        id: changes
+        run: |
+          echo "==> [3/4] Checking for changes..."
+
+          if git diff --quiet -- python-image.digest requirements.lock; then
+            echo "    No changes."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "    Changes detected."
+          git diff -- python-image.digest requirements.lock
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit changes
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          echo "==> [4/4] Committing changes..."
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add python-image.digest requirements.lock
+
+          git commit \
+            -m "chore: update Python image and requirements lock"
+
+          git push origin master
+
+          echo "    Changes committed and pushed."
