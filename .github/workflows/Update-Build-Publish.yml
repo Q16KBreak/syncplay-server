@@ -5,15 +5,14 @@ on:
     - cron: "13 19 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 concurrency:
   group: build
   cancel-in-progress: false
 
 jobs:
   update:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
 
     steps:
@@ -96,7 +95,9 @@ jobs:
           git push origin master
 
           echo "    Changes committed and pushed."
-  build:
+  build:    
+    permissions:
+      contents: read
     needs: update
     runs-on: ubuntu-latest
 
