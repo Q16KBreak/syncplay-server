@@ -22,7 +22,7 @@ cryptography==50.0.1
     #   service-identity
 hyperlink==21.0.0
     # via twisted
-idna==3.19
+idna==3.20
     # via
     #   hyperlink
     #   twisted
