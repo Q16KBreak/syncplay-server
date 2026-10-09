@@ -32,7 +32,7 @@ packaging==26.3
     # via incremental
 pem==23.1.0
     # via -r /tmp/requirements.in
-pycparser==3.1
+pycparser==3.11
     # via cffi
 pyopenssl==26.4.0
     # via twisted
