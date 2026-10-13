@@ -30,12 +30,12 @@ COPY --from=build /source /opt/syncplay
 
 EXPOSE 8999
 
-HEALTHCHECK \
-    --interval=30s \
-    --timeout=5s \
-    --start-period=10s \
-    --retries=3 \
-    CMD ["python", "/health.py"]
+# HEALTHCHECK \
+#     --interval=30s \
+#     --timeout=5s \
+#     --start-period=10s \
+#     --retries=3 \
+#     CMD ["python", "/health.py"]
 
 ARG SYNCPLAY_SHA
 ARG BUILD_SHA
