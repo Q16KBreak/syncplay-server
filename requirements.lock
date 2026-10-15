@@ -42,5 +42,5 @@ twisted==26.4.0
     # via -r /tmp/requirements.in
 typing-extensions==4.16.0
     # via twisted
-zope-interface==8.6
+zope-interface==8.7
     # via twisted
