@@ -4,11 +4,6 @@ FROM ${PYTHON_IMAGE} AS build
 
 RUN apk add --no-cache git
 
-COPY requirements.lock /requirements.lock
-RUN pip install --no-cache-dir \
-    --prefix=/install \
-    -r /requirements.lock
-
 WORKDIR /source
 ARG SYNCPLAY_SHA
 RUN git init . && \
@@ -16,6 +11,11 @@ RUN git init . && \
     git fetch --depth=1 origin "${SYNCPLAY_SHA}" && \
     git checkout FETCH_HEAD && \
     rm -rf .git
+
+COPY requirements.lock /requirements.lock
+RUN pip install --no-cache-dir \
+    --prefix=/install \
+    -r /requirements.lock
 
 FROM ${PYTHON_IMAGE}
 
@@ -25,8 +25,8 @@ COPY health.py /health.py
 RUN chmod +x /entrypoint.sh && \
     mkdir -p /var/lib/syncplay 
 
-COPY --from=build /install /usr/local
 COPY --from=build /source /opt/syncplay
+COPY --from=build /install /usr/local
 
 EXPOSE 8999
 
