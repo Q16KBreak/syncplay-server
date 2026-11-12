@@ -6,6 +6,8 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+      time: "03:13"
+      timezone: "Asia/Shanghai"
     cooldown:
       default-days: 3
     open-pull-requests-limit: 10
@@ -15,6 +17,8 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+      time: "03:13"
+      timezone: "Asia/Shanghai"
     cooldown:
       default-days: 3
     open-pull-requests-limit: 5
@@ -24,6 +28,8 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+      time: "03:13"
+      timezone: "Asia/Shanghai"
     cooldown:
       default-days: 3
     open-pull-requests-limit: 5
