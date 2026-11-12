@@ -1,0 +1,125 @@
+name: Dependabot Merge Automation
+
+on:
+  pull_request_target:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  schedule:
+    - cron: "30 20 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: dependabot-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  security:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for validation checks
+        if: steps.metadata.outputs.ghsa-id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          echo "==> Waiting for validation checks..."
+
+          deadline=$((SECONDS + 600))
+          while :; do
+            count="$(gh pr checks "$PR_URL" --json name --jq 'length' 2>/dev/null || true)"
+            if [ "${count:-0}" -gt 0 ]; then
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "No checks reported for this pull request."
+              exit 1
+            fi
+            echo "    No checks yet, retrying..."
+            sleep 10
+          done
+
+          gh pr checks "$PR_URL" --watch --interval 15
+
+      - name: Merge security update
+        if: steps.metadata.outputs.ghsa-id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "==> Merging security update..."
+          gh pr merge "$PR_URL" --squash --match-head-commit "$HEAD_SHA"
+
+      - name: Trigger image build
+        if: steps.metadata.outputs.ghsa-id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "==> Dispatching Update-Build-Publish..."
+          gh workflow run Update-Build-Publish.yml --ref master
+
+  daily:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Merge validated Dependabot pull requests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "==> Looking for open Dependabot pull requests..."
+
+          merged=0
+
+          prs="$(gh pr list --state open --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("dependabot/")) | .number')"
+
+          for pr in $prs; do
+            echo "==> PR #$pr"
+
+            if ! gh pr checks "$pr" --watch --interval 15; then
+              echo "    Checks not passing; skipping."
+              continue
+            fi
+
+            head_sha="$(gh pr view "$pr" --json headRefOid --jq .headRefOid)"
+
+            if gh pr merge "$pr" --squash --match-head-commit "$head_sha"; then
+              merged=$((merged + 1))
+            else
+              echo "    Merge failed; skipping."
+            fi
+          done
+
+          if [ "$merged" -gt 0 ]; then
+            echo "==> Dispatching image build..."
+            gh workflow run Update-Build-Publish.yml --ref master
+          else
+            echo "==> Nothing merged."
+          fi
