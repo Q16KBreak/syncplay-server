@@ -34,7 +34,7 @@ jobs:
       - name: Get build inputs
         id: inputs
         run: |
-          echo "==> [1/7] Getting build inputs..."
+          echo "==> Getting build inputs..."
 
           BUILD_SHA="$(git rev-parse --short=7 HEAD)"
 
@@ -69,7 +69,7 @@ jobs:
           BUILD_SHA: ${{ steps.inputs.outputs.build_sha }}
           SYNCPLAY_SHA: ${{ steps.inputs.outputs.syncplay_sha }}
         run: |
-          echo "==> [2/7] Checking latest published image..."
+          echo "==> Checking latest published image..."
 
           if ! docker pull "$IMAGE:latest"; then
             echo "    No existing image found."
@@ -139,5 +139,5 @@ jobs:
       - name: Build skipped
         if: steps.check.outputs.build == 'false'
         run: |
-          echo "==> [7/7] Build skipped."
+          echo "==> Build skipped."
           echo "    Syncplay SHA and BUILD SHA are unchanged."
