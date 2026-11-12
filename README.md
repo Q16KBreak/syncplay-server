@@ -86,11 +86,17 @@ chmod +x build.sh
 
 ### 依赖更新
 
-依赖更新由 [Dependabot](https://docs.github.com/code-security/dependabot) 以 Pull Request 方式管理：
+依赖更新由 [Dependabot](https://docs.github.com/code-security/dependabot) 管理，并自动合并发布：
 
-* **安全更新**：GitHub 发布安全公告后立即创建 PR，不受冷静期限制。
-* **普通版本更新**：新版本发布后有 3 天冷静期，之后创建 PR。
-* 审查并合并 PR 后，`master` 的 push 会自动触发镜像构建与发布。
+* **安全更新**：GitHub 发布安全公告后立即创建 PR，不受冷静期和每日检查时间限制。
+* **普通版本更新**：新版本发布后有 3 天冷静期，Dependabot 每天 03:13（Asia/Shanghai）检查，满 3 天后创建 PR。
+
+PR 会先运行 `PR Validation` 构建镜像（不推送）。随后：
+
+* **安全更新 PR**：校验通过后立即自动合并，并派发构建发布，通常几分钟内完成。
+* **普通更新 PR**：等待每天 04:30（Asia/Shanghai）的 `Dependabot Merge Automation` 批量合并已通过校验的 PR，然后派发一次构建发布。
+
+校验失败、存在冲突或构建失败时，PR 会被跳过，不会合并，也不会污染 `master`。日常流程不需要人工合并，只有升级本身有问题时才需要人工处理。
 
 Python 依赖的源清单是 `requirements.in`，版本锁文件 `requirements.txt` 由 `pip-compile` 生成并随 Dependabot PR 一起更新。`requirements.in` 基于上游 Syncplay 的 `requirements.txt`，仅保留 Linux 镜像需要的条目（省略上游中仅 darwin/win32 使用的依赖）；上游增删 Linux 依赖时，需要手动同步一次 `requirements.in`。基础镜像 digest 固定在 `Dockerfile` 的 `FROM` 行，同样由 Dependabot 更新。
 
