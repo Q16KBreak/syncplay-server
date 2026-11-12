@@ -80,9 +80,19 @@ chmod +x build.sh
 ./build.sh
 ```
 
-本地构建使用仓库中的 `python-image.digest` 固定 Python 基础镜像，并使用仓库中的 `requirements.lock` 安装 Python 依赖。
+本地构建使用 Dockerfile 中固定（digest）的 Python 基础镜像，并使用仓库中的 `requirements.txt` 安装 Python 依赖。
 
 构建过程中会获取 Syncplay `master` 的最新 commit，并使用该 commit 构建镜像。
+
+### 依赖更新
+
+依赖更新由 [Dependabot](https://docs.github.com/code-security/dependabot) 以 Pull Request 方式管理：
+
+* **安全更新**：GitHub 发布安全公告后立即创建 PR，不受冷静期限制。
+* **普通版本更新**：新版本发布后有 3 天冷静期，之后创建 PR。
+* 审查并合并 PR 后，`master` 的 push 会自动触发镜像构建与发布。
+
+Python 依赖的源清单是 `requirements.in`，版本锁文件 `requirements.txt` 由 `pip-compile` 生成并随 Dependabot PR 一起更新。`requirements.in` 对应上游 Syncplay 的 `requirements.txt`；上游增删依赖时，需要手动同步一次 `requirements.in`。基础镜像 digest 固定在 `Dockerfile` 的 `FROM` 行，同样由 Dependabot 更新。
 
 ### 数据持久化
 
