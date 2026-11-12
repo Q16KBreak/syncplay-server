@@ -1,0 +1,29 @@
+version: 2
+
+updates:
+  # Python 依赖：requirements.in -> requirements.txt（pip-compile 产物）
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 10
+
+  # 基础镜像：Dockerfile 中 digest 固定的 python:3.14-alpine
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+
+  # Workflow 中使用的 GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
