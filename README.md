@@ -4,6 +4,8 @@
 
 ## 使用
 
+镜像支持 `linux/amd64` 与 `linux/arm64`。
+
 ### Docker Compose
 
 可以直接下载仓库中的 Compose 文件：
@@ -51,81 +53,16 @@ services:
       # SYNCPLAY_TLS: "/tls"
 ```
 
-### 本地构建
-
-克隆本仓库：
-
-```bash
-git clone https://github.com/Q16KBreak/syncplay-server.git
-cd syncplay-server
-```
-
-执行构建脚本：
-
-```bash
-./build.sh
-```
-
-构建完成后会生成：
-
-```text
-syncplay-server:latest
-syncplay-server:<Syncplay commit SHA>-<repository commit SHA>
-```
-
-如果构建脚本没有执行权限，可以使用：
-
-```bash
-chmod +x build.sh
-./build.sh
-```
-
-本地构建使用 Dockerfile 中固定（digest）的 Python 基础镜像，并使用仓库中的 `requirements.txt` 安装 Python 依赖。
-
-构建过程中会获取 Syncplay `master` 的最新 commit，并使用该 commit 构建镜像。
-
-### 依赖更新
-
-依赖更新由 [Dependabot](https://docs.github.com/code-security/dependabot) 管理，并自动合并发布：
-
-* **安全更新**：GitHub 发布安全公告后立即创建 PR，不受冷静期和每日检查时间限制。
-* **普通版本更新**：新版本发布后有 3 天冷静期，Dependabot 每天 03:13（Asia/Shanghai）检查，满 3 天后创建 PR。
-
-PR 会先运行 `PR Validation` 构建镜像（不推送）。随后：
-
-* **安全更新 PR**：校验通过后立即自动合并，并派发构建发布，通常几分钟内完成。
-* **普通更新 PR**：等待每天 04:30（Asia/Shanghai）的 `Dependabot Merge Automation` 批量合并已通过校验的 PR，然后派发一次构建发布。
-
-校验失败、存在冲突或构建失败时，PR 会被跳过，不会合并，也不会污染 `master`。日常流程不需要人工合并，只有升级本身有问题时才需要人工处理。
-
-Python 依赖的源清单是 `requirements.in`，版本锁文件 `requirements.txt` 由 `pip-compile` 生成并随 Dependabot PR 一起更新。`requirements.in` 基于上游 Syncplay 的 `requirements.txt`，仅保留 Linux 镜像需要的条目（省略上游中仅 darwin/win32 使用的依赖）；上游增删 Linux 依赖时，需要手动同步一次 `requirements.in`。基础镜像 digest 固定在 `Dockerfile` 的 `FROM` 行，同样由 Dependabot 更新。
-
 ### 数据持久化
 
-容器使用：
-
-```text
-/var/lib/syncplay
-```
-
-保存运行时数据。
-
-推荐将其挂载到宿主机：
+容器使用 `/var/lib/syncplay` 保存运行时数据，推荐将其挂载到宿主机：
 
 ```yaml
 volumes:
   - ./data:/var/lib/syncplay
 ```
 
-其中包括自动生成的 `salt` 文件。
-
-首次启动时，如果没有指定 `SYNCPLAY_SALT`，容器会自动生成随机 salt 并保存到：
-
-```text
-./data/salt
-```
-
-因此只要保留 `./data`，重新创建容器不会改变 salt。
+其中包括自动生成的 `salt` 文件。首次启动时如果没有指定 `SYNCPLAY_SALT`，容器会自动生成随机 salt 并保存到 `./data/salt`；只要保留 `./data`，重新创建容器不会改变 salt。
 
 ## 环境变量
 
@@ -191,35 +128,6 @@ docker run --rm \
 ```
 
 `entrypoint.sh` 会保留传入的命令行参数，并在此基础上添加由环境变量生成的参数。
-
-
-## 标签命名规则
-
-镜像标签格式为：
-
-```text
-<Syncplay commit SHA>-<repository commit SHA>
-```
-
-其中：
-
-* `<Syncplay commit SHA>`：构建时使用的 Syncplay 源码 commit SHA
-* `<repository commit SHA>`：构建配置仓库对应 commit 的短 SHA
-
-例如：
-
-```text
-a1b2c3d4e5f6...-7f3a21c
-```
-
-`latest` 始终指向当前最新成功构建的镜像。
-
-镜像支持：
-
-```text
-linux/amd64
-linux/arm64
-```
 
 ## License
 
