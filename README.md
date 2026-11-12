@@ -92,7 +92,7 @@ chmod +x build.sh
 * **普通版本更新**：新版本发布后有 3 天冷静期，之后创建 PR。
 * 审查并合并 PR 后，`master` 的 push 会自动触发镜像构建与发布。
 
-Python 依赖的源清单是 `requirements.in`，版本锁文件 `requirements.txt` 由 `pip-compile` 生成并随 Dependabot PR 一起更新。`requirements.in` 对应上游 Syncplay 的 `requirements.txt`；上游增删依赖时，需要手动同步一次 `requirements.in`。基础镜像 digest 固定在 `Dockerfile` 的 `FROM` 行，同样由 Dependabot 更新。
+Python 依赖的源清单是 `requirements.in`，版本锁文件 `requirements.txt` 由 `pip-compile` 生成并随 Dependabot PR 一起更新。`requirements.in` 基于上游 Syncplay 的 `requirements.txt`，仅保留 Linux 镜像需要的条目（省略上游中仅 darwin/win32 使用的依赖）；上游增删 Linux 依赖时，需要手动同步一次 `requirements.in`。基础镜像 digest 固定在 `Dockerfile` 的 `FROM` 行，同样由 Dependabot 更新。
 
 ### 数据持久化
 
