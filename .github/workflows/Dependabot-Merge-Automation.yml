@@ -21,6 +21,7 @@ permissions:
   contents: write
   pull-requests: write
   actions: write
+  vulnerability-alerts: read
 
 jobs:
   security:
@@ -38,8 +39,49 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Classify update
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+        run: |
+          security=false
+
+          deps="$(printf '%s' "$DEPENDENCY_NAMES" |
+            tr ',' '\n' |
+            sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
+            tr '[:upper:]' '[:lower:]' |
+            tr '_.' '-')"
+
+          if [ -z "$deps" ]; then
+            echo "No dependency names; treating as version update."
+          elif ! alerts="$(gh api "repos/$GH_REPO/dependabot/alerts?state=open&per_page=100" \
+            --paginate --jq '.[].dependency.package.name' 2>/dev/null)"; then
+            echo "Unable to read Dependabot alerts; treating as version update."
+          else
+            alerts="$(printf '%s\n' "$alerts" |
+              tr '[:upper:]' '[:lower:]' |
+              tr '_.' '-')"
+
+            while IFS= read -r dep; do
+              [ -z "$dep" ] && continue
+              if printf '%s\n' "$alerts" | grep -Fxq "$dep"; then
+                echo "Dependency '$dep' has an open Dependabot alert."
+                security=true
+                break
+              fi
+            done <<< "$deps"
+
+            if [ "$security" = "false" ]; then
+              echo "No matching open Dependabot alerts."
+            fi
+          fi
+
+          echo "security=$security" >> "$GITHUB_OUTPUT"
+
       - name: Wait for validation checks
-        if: steps.metadata.outputs.ghsa-id != ''
+        if: steps.classify.outputs.security == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -64,7 +106,7 @@ jobs:
           gh pr checks "$PR_URL" --watch --interval 15
 
       - name: Merge security update
-        if: steps.metadata.outputs.ghsa-id != ''
+        if: steps.classify.outputs.security == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -75,7 +117,7 @@ jobs:
           gh pr merge "$PR_URL" --squash --match-head-commit "$HEAD_SHA"
 
       - name: Trigger image build
-        if: steps.metadata.outputs.ghsa-id != ''
+        if: steps.classify.outputs.security == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
