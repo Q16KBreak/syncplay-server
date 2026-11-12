@@ -1,6 +1,6 @@
-ARG PYTHON_IMAGE=python:3.14-alpine
+FROM python:3.14-alpine@sha256:a18b20ad69e74df6cf6d2e1b1a260d7a1ecf5380fd83b310f83ba88c461cf894 AS python-base
 
-FROM ${PYTHON_IMAGE} AS build
+FROM python-base AS build
 
 RUN apk add --no-cache git
 
@@ -12,12 +12,12 @@ RUN git init . && \
     git checkout FETCH_HEAD && \
     rm -rf .git
 
-COPY requirements.lock /requirements.lock
+COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir \
     --prefix=/install \
-    -r /requirements.lock
+    -r /requirements.txt
 
-FROM ${PYTHON_IMAGE}
+FROM python-base
 
 COPY entrypoint.sh /entrypoint.sh
 COPY health.py /health.py
