@@ -31,6 +31,7 @@ jobs:
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Fetch Dependabot metadata
@@ -80,6 +81,16 @@ jobs:
 
           echo "security=$security" >> "$GITHUB_OUTPUT"
 
+      - name: Verify merge token
+        if: steps.classify.outputs.security == 'true'
+        env:
+          MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          if [ -z "$MERGE_TOKEN" ]; then
+            echo "::error::AUTO_MERGE_TOKEN is not set; cannot merge pull requests that update workflow files."
+            exit 1
+          fi
+
       - name: Wait for validation checks
         if: steps.classify.outputs.security == 'true'
         env:
@@ -89,26 +100,35 @@ jobs:
         run: |
           echo "==> Waiting for validation checks..."
 
-          deadline=$((SECONDS + 600))
+          deadline=$((SECONDS + 900))
           while :; do
-            count="$(gh pr checks "$PR_URL" --json name --jq 'length' 2>/dev/null || true)"
-            if [ "${count:-0}" -gt 0 ]; then
+            buckets="$(gh pr checks "$PR_URL" --json name,bucket \
+              --jq '.[] | select(.name == "Validate image build") | .bucket' \
+              2>/dev/null || true)"
+
+            if printf '%s\n' "$buckets" | grep -qx 'pass'; then
+              echo "    Validation passed."
               break
             fi
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "No checks reported for this pull request."
+
+            if printf '%s\n' "$buckets" | grep -Eq '^(fail|cancel)$'; then
+              echo "    Validation failed."
               exit 1
             fi
-            echo "    No checks yet, retrying..."
-            sleep 10
-          done
 
-          gh pr checks "$PR_URL" --watch --interval 15
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "    Timed out waiting for validation checks."
+              exit 1
+            fi
+
+            echo "    Waiting for Validate image build..."
+            sleep 15
+          done
 
       - name: Merge security update
         if: steps.classify.outputs.security == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -128,14 +148,52 @@ jobs:
   daily:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
+      - name: Verify merge token
+        env:
+          MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          if [ -z "$MERGE_TOKEN" ]; then
+            echo "::error::AUTO_MERGE_TOKEN is not set; cannot merge pull requests that update workflow files."
+            exit 1
+          fi
+
       - name: Merge validated Dependabot pull requests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
           echo "==> Looking for open Dependabot pull requests..."
+
+          wait_for_validation() {
+            local pr="$1"
+            local deadline=$((SECONDS + 900))
+            local buckets
+
+            while :; do
+              buckets="$(gh pr checks "$pr" --json name,bucket \
+                --jq '.[] | select(.name == "Validate image build") | .bucket' \
+                2>/dev/null || true)"
+
+              if printf '%s\n' "$buckets" | grep -qx 'pass'; then
+                return 0
+              fi
+
+              if printf '%s\n' "$buckets" | grep -Eq '^(fail|cancel)$'; then
+                return 1
+              fi
+
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                return 1
+              fi
+
+              echo "    Waiting for Validate image build..."
+              sleep 15
+            done
+          }
 
           merged=0
 
@@ -145,14 +203,14 @@ jobs:
           for pr in $prs; do
             echo "==> PR #$pr"
 
-            if ! gh pr checks "$pr" --watch --interval 15; then
+            if ! wait_for_validation "$pr"; then
               echo "    Checks not passing; skipping."
               continue
             fi
 
             head_sha="$(gh pr view "$pr" --json headRefOid --jq .headRefOid)"
 
-            if gh pr merge "$pr" --squash --match-head-commit "$head_sha"; then
+            if GH_TOKEN="$MERGE_TOKEN" gh pr merge "$pr" --squash --match-head-commit "$head_sha"; then
               merged=$((merged + 1))
             else
               echo "    Merge failed; skipping."
