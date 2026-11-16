@@ -1,26 +1,149 @@
 name: Build & Publish
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - Dockerfile
-      - requirements.txt
-      - requirements.in
-      - entrypoint.sh
-      - health.py
-      - .github/workflows/Update-Build-Publish.yml
+  # 04:30 Asia/Shanghai: merge the daily Dependabot batch, then build once.
+  # Ordering is guaranteed inside the run, so cron drift no longer matters.
   schedule:
-    - cron: "13 19 * * *"
+    - cron: "30 20 * * *"
   workflow_dispatch:
+    inputs:
+      pr:
+        description: "Merge only this pull request number before building"
+        type: string
+        required: false
+      force:
+        description: "Build even if Syncplay and image inputs are unchanged"
+        type: boolean
+        default: false
 
 concurrency:
-  group: build
+  # Serialize merges so two runs never race on master.
+  group: image-update
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
+  merge:
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      merged_count: ${{ steps.merge.outputs.merged_count }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+
+    steps:
+      - name: Verify merge token
+        env:
+          MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          if [ -z "$MERGE_TOKEN" ]; then
+            echo "::error::AUTO_MERGE_TOKEN is not set; cannot merge pull requests that update workflow files."
+            exit 1
+          fi
+
+      - name: Merge Dependabot pull requests
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_INPUT: ${{ github.event.inputs.pr }}
+        run: |
+          echo "==> Looking for Dependabot pull requests..."
+
+          wait_for_validation() {
+            local pr="$1"
+            local deadline=$((SECONDS + 900))
+            local buckets
+
+            while :; do
+              buckets="$(gh pr checks "$pr" --json name,bucket \
+                --jq '.[] | select(.name == "Validate image build") | .bucket' \
+                2>/dev/null || true)"
+
+              if printf '%s\n' "$buckets" | grep -qx 'pass'; then
+                return 0
+              fi
+
+              if printf '%s\n' "$buckets" | grep -Eq '^(fail|cancel)$'; then
+                return 1
+              fi
+
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                return 1
+              fi
+
+              echo "    Waiting for Validate image build..."
+              sleep 15
+            done
+          }
+
+          is_mergeable_pr() {
+            local pr="$1"
+
+            gh pr view "$pr" --json state,isDraft,author \
+              --jq 'select(.state == "OPEN" and .isDraft == false and .author.login == "dependabot[bot]") | "ok"' \
+              2>/dev/null | grep -qx 'ok'
+          }
+
+          merged=0
+          merge_sha=""
+
+          if [ -n "$PR_INPUT" ]; then
+            prs="$PR_INPUT"
+          else
+            prs="$(gh pr list --state open --json number,headRefName \
+              --jq '.[] | select(.headRefName | startswith("dependabot/")) | .number')"
+          fi
+
+          for pr in $prs; do
+            echo "==> PR #$pr"
+
+            if ! is_mergeable_pr "$pr"; then
+              echo "    Not an open non-draft Dependabot pull request; skipping."
+              continue
+            fi
+
+            if ! wait_for_validation "$pr"; then
+              echo "    Checks not passing; skipping."
+              continue
+            fi
+
+            head_sha="$(gh pr view "$pr" --json headRefOid --jq .headRefOid)"
+
+            if GH_TOKEN="$MERGE_TOKEN" gh pr merge "$pr" --squash --match-head-commit "$head_sha"; then
+              merged=$((merged + 1))
+
+              sha="$(gh api "repos/$GH_REPO/pulls/$pr" \
+                --jq '.merge_commit_sha // empty' 2>/dev/null || true)"
+              if [ -n "$sha" ] && [ "$sha" != "null" ]; then
+                merge_sha="$sha"
+                echo "    Merge commit: $merge_sha"
+              fi
+            else
+              echo "    Merge failed; skipping."
+            fi
+          done
+
+          echo "    Merged $merged pull request(s)."
+
+          echo "merged_count=$merged" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: merge
+    if: >-
+      always() &&
+      needs.merge.result != 'cancelled' &&
+      (needs.merge.outputs.merged_count != '0' ||
+       github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.pr == '') ||
+       github.event.inputs.force == 'true')
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -30,13 +153,49 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: master
+          fetch-depth: 0
+
+      - name: Resolve target commit
+        id: target
+        env:
+          MERGE_SHA: ${{ needs.merge.outputs.merge_sha }}
+        run: |
+          echo "==> Resolving target commit..."
+
+          git fetch --no-tags origin master
+
+          if [ -n "$MERGE_SHA" ]; then
+            for _ in 1 2 3 4 5; do
+              if git cat-file -e "${MERGE_SHA}^{commit}" 2>/dev/null; then
+                break
+              fi
+              sleep 3
+              git fetch --no-tags origin master
+            done
+
+            if ! git cat-file -e "${MERGE_SHA}^{commit}" 2>/dev/null; then
+              echo "::error::Merge commit $MERGE_SHA is unavailable; refusing to skip silently."
+              exit 1
+            fi
+
+            git reset --hard --quiet "$MERGE_SHA"
+          else
+            git reset --hard --quiet FETCH_HEAD
+          fi
+
+          TARGET_SHA="$(git rev-parse HEAD)"
+          BUILD_SHA="$(git rev-parse --short=7 HEAD)"
+
+          echo "    Target commit:    $TARGET_SHA"
+          echo "    Target build SHA: $BUILD_SHA"
+
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "build_sha=$BUILD_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Get build inputs
         id: inputs
         run: |
           echo "==> Getting build inputs..."
-
-          BUILD_SHA="$(git rev-parse --short=7 HEAD)"
 
           SYNCPLAY_SHA="$(
             git ls-remote \
@@ -50,10 +209,8 @@ jobs:
             exit 1
           fi
 
-          echo "    BUILD SHA:    $BUILD_SHA"
           echo "    Syncplay SHA: $SYNCPLAY_SHA"
 
-          echo "build_sha=$BUILD_SHA" >> "$GITHUB_OUTPUT"
           echo "syncplay_sha=$SYNCPLAY_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Login to Docker Hub
@@ -66,48 +223,64 @@ jobs:
         id: check
         env:
           IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/syncplay-server
-          BUILD_SHA: ${{ steps.inputs.outputs.build_sha }}
+          FORCE: ${{ github.event.inputs.force }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          BUILD_SHA: ${{ steps.target.outputs.build_sha }}
           SYNCPLAY_SHA: ${{ steps.inputs.outputs.syncplay_sha }}
         run: |
           echo "==> Checking latest published image..."
 
-          if ! docker pull "$IMAGE:latest"; then
-            echo "    No existing image found."
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Files that change the image content. Keep this list in sync with the
+          # Dockerfile: requirements.in is only the pip-compile manifest, and
+          # CI/README changes do not affect the image.
+          BUILD_INPUTS="Dockerfile requirements.txt entrypoint.sh health.py"
+
+          build=false
+          reason=""
+
+          if [ "${FORCE:-false}" = "true" ]; then
+            build=true
+            reason="Force build requested."
+          elif ! docker pull "$IMAGE:latest"; then
+            build=true
+            reason="No existing image found."
+          else
+            REVISION="$(
+              docker inspect "$IMAGE:latest" \
+                --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+            )"
+
+            if [ -z "$REVISION" ] || [ "$REVISION" = "<no value>" ]; then
+              build=true
+              reason="Existing image has no revision label."
+            else
+              PUBLISHED_SYNCPLAY_SHA="${REVISION%-*}"
+              PUBLISHED_BUILD_SHA="${REVISION##*-}"
+
+              echo "    Target Syncplay SHA:    $SYNCPLAY_SHA"
+              echo "    Target BUILD SHA:       $BUILD_SHA ($TARGET_SHA)"
+              echo "    Published Syncplay SHA: $PUBLISHED_SYNCPLAY_SHA"
+              echo "    Published BUILD SHA:    $PUBLISHED_BUILD_SHA"
+
+              if [ "$PUBLISHED_SYNCPLAY_SHA" != "$SYNCPLAY_SHA" ]; then
+                build=true
+                reason="Syncplay changed."
+              elif ! git cat-file -e "${PUBLISHED_BUILD_SHA}^{commit}" 2>/dev/null; then
+                build=true
+                reason="Published commit $PUBLISHED_BUILD_SHA is not in the local history."
+              elif ! git diff --quiet "$PUBLISHED_BUILD_SHA" "$TARGET_SHA" -- $BUILD_INPUTS; then
+                build=true
+                reason="Image inputs changed: $(git diff --name-only "$PUBLISHED_BUILD_SHA" "$TARGET_SHA" -- $BUILD_INPUTS | tr '\n' ' ')"
+              else
+                reason="No image input changes since $PUBLISHED_BUILD_SHA."
+              fi
+            fi
           fi
 
-          REVISION="$(
-            docker inspect "$IMAGE:latest" \
-              --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
-          )"
+          echo "    Decision: build=$build"
+          echo "    Reason:   $reason"
 
-          if [ -z "$REVISION" ] || [ "$REVISION" = "<no value>" ]; then
-            echo "    Existing image has no revision label."
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          PUBLISHED_SYNCPLAY_SHA="${REVISION%-*}"
-          PUBLISHED_BUILD_SHA="${REVISION##*-}"
-
-          echo "    Published Syncplay SHA: $PUBLISHED_SYNCPLAY_SHA"
-          echo "    Published BUILD SHA:    $PUBLISHED_BUILD_SHA"
-
-          if [ "$PUBLISHED_SYNCPLAY_SHA" != "$SYNCPLAY_SHA" ]; then
-            echo "    Syncplay changed."
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$PUBLISHED_BUILD_SHA" != "$BUILD_SHA" ]; then
-            echo "    Repository changed."
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "    No changes detected."
-          echo "build=false" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         if: steps.check.outputs.build == 'true'
@@ -127,11 +300,11 @@ jobs:
 
           build-args: |
             SYNCPLAY_SHA=${{ steps.inputs.outputs.syncplay_sha }}
-            BUILD_SHA=${{ steps.inputs.outputs.build_sha }}
+            BUILD_SHA=${{ steps.target.outputs.build_sha }}
 
           tags: |
             ${{ vars.DOCKERHUB_USERNAME }}/syncplay-server:latest
-            ${{ vars.DOCKERHUB_USERNAME }}/syncplay-server:${{ steps.inputs.outputs.syncplay_sha }}-${{ steps.inputs.outputs.build_sha }}
+            ${{ vars.DOCKERHUB_USERNAME }}/syncplay-server:${{ steps.inputs.outputs.syncplay_sha }}-${{ steps.target.outputs.build_sha }}
 
           cache-from: type=registry,ref=${{ vars.DOCKERHUB_USERNAME }}/syncplay-server:buildcache
           cache-to: type=registry,ref=${{ vars.DOCKERHUB_USERNAME }}/syncplay-server:buildcache,mode=max
@@ -140,4 +313,4 @@ jobs:
         if: steps.check.outputs.build == 'false'
         run: |
           echo "==> Build skipped."
-          echo "    Syncplay SHA and BUILD SHA are unchanged."
+          echo "    No image input changes and Syncplay SHA is unchanged."

@@ -1,0 +1,105 @@
+name: Dependabot Security Update
+
+# GitHub Actions cannot be triggered by `dependabot_alert` (it is a webhook
+# event only), so the security-update signal is the Dependabot pull request
+# that the alert creates. This workflow never checks out pull request code: it
+# only reads metadata and dispatches the privileged merge + build workflow.
+on:
+  pull_request_target:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to treat as a security update"
+        type: string
+        required: true
+
+concurrency:
+  group: security-update-trigger
+  cancel-in-progress: true
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+  vulnerability-alerts: read
+
+jobs:
+  trigger:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.user.login == 'dependabot[bot]' &&
+       github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Fetch Dependabot metadata
+        if: github.event_name == 'pull_request_target'
+        id: metadata
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Classify update
+        if: github.event_name == 'pull_request_target'
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+        run: |
+          security=false
+
+          deps="$(printf '%s' "$DEPENDENCY_NAMES" |
+            tr ',' '\n' |
+            sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
+            tr '[:upper:]' '[:lower:]' |
+            tr '_.' '-')"
+
+          if [ -z "$deps" ]; then
+            echo "No dependency names; treating as version update."
+          elif ! alerts="$(gh api "repos/$GH_REPO/dependabot/alerts?state=open&per_page=100" \
+            --paginate --jq '.[].dependency.package.name' 2>/dev/null)"; then
+            echo "Unable to read Dependabot alerts; treating as version update."
+          else
+            alerts="$(printf '%s\n' "$alerts" |
+              tr '[:upper:]' '[:lower:]' |
+              tr '_.' '-')"
+
+            while IFS= read -r dep; do
+              [ -z "$dep" ] && continue
+              if printf '%s\n' "$alerts" | grep -Fxq "$dep"; then
+                echo "Dependency '$dep' has an open Dependabot alert."
+                security=true
+                break
+              fi
+            done <<< "$deps"
+
+            if [ "$security" = "false" ]; then
+              echo "No matching open Dependabot alerts."
+            fi
+          fi
+
+          echo "security=$security" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger merge and build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+          SECURITY: ${{ steps.classify.outputs.security }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$SECURITY" = "true" ]; then
+            echo "==> Dispatching Update-Build-Publish for pull request #$PR_NUMBER..."
+            gh workflow run Update-Build-Publish.yml --ref master -f "pr=$PR_NUMBER"
+          else
+            echo "==> Version update; the daily run will merge it."
+          fi
