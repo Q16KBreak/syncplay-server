@@ -1,12 +1,14 @@
 version: 2
 
+# 每 8 小时检查；随机选定上海时间 03:20、11:20、19:20。
+# Dependabot cron 仅精确到分钟，不支持配置秒。
 updates:
   # Python 依赖：requirements.in -> requirements.txt（pip-compile 产物）
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "daily"
-      time: "03:13"
+      interval: "cron"
+      cronjob: "20 3,11,19 * * *"
       timezone: "Asia/Shanghai"
     cooldown:
       default-days: 3
@@ -16,8 +18,8 @@ updates:
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "daily"
-      time: "03:13"
+      interval: "cron"
+      cronjob: "20 3,11,19 * * *"
       timezone: "Asia/Shanghai"
     cooldown:
       default-days: 3
@@ -27,8 +29,8 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
-      time: "03:13"
+      interval: "cron"
+      cronjob: "20 3,11,19 * * *"
       timezone: "Asia/Shanghai"
     cooldown:
       default-days: 3

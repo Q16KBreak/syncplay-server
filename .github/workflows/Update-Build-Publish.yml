@@ -7,10 +7,6 @@ on:
     - cron: "30 20 * * *"
   workflow_dispatch:
     inputs:
-      pr:
-        description: "Merge only this pull request number before building"
-        type: string
-        required: false
       force:
         description: "Build even if Syncplay and image inputs are unchanged"
         type: boolean
@@ -20,6 +16,7 @@ concurrency:
   # Serialize merges so two runs never race on master.
   group: image-update
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -29,7 +26,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      checks: read
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -52,82 +49,83 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR_INPUT: ${{ github.event.inputs.pr }}
         run: |
           echo "==> Looking for Dependabot pull requests..."
 
-          wait_for_validation() {
-            local pr="$1"
-            local deadline=$((SECONDS + 900))
-            local buckets
-
-            while :; do
-              buckets="$(gh pr checks "$pr" --json name,bucket \
-                --jq '.[] | select(.name == "Validate image build") | .bucket' \
-                2>/dev/null || true)"
-
-              if printf '%s\n' "$buckets" | grep -qx 'pass'; then
-                return 0
-              fi
-
-              if printf '%s\n' "$buckets" | grep -Eq '^(fail|cancel)$'; then
-                return 1
-              fi
-
-              if [ "$SECONDS" -ge "$deadline" ]; then
-                return 1
-              fi
-
-              echo "    Waiting for Validate image build..."
-              sleep 15
-            done
-          }
-
-          is_mergeable_pr() {
-            local pr="$1"
-
-            gh pr view "$pr" --json state,isDraft,author \
-              --jq 'select(.state == "OPEN" and .isDraft == false and .author.login == "dependabot[bot]") | "ok"' \
-              2>/dev/null | grep -qx 'ok'
-          }
-
           merged=0
           merge_sha=""
+          deadline=$((SECONDS + 900))
 
-          if [ -n "$PR_INPUT" ]; then
-            prs="$PR_INPUT"
-          else
-            prs="$(gh pr list --state open --json number,headRefName \
-              --jq '.[] | select(.headRefName | startswith("dependabot/")) | .number')"
-          fi
+          while :; do
+            pending=false
+            prs="$(gh pr list --state open --base master --limit 1000 \
+              --json number,isDraft,author,headRefOid,mergeable \
+              --jq '.[] | select(.isDraft == false and .author.is_bot == true and .author.login == "app/dependabot") | [.number, .headRefOid, .mergeable] | @tsv')"
 
-          for pr in $prs; do
-            echo "==> PR #$pr"
+            while IFS=$'\t' read -r pr head_sha mergeable; do
+              [ -n "$pr" ] || continue
+              echo "==> PR #$pr ($head_sha)"
 
-            if ! is_mergeable_pr "$pr"; then
-              echo "    Not an open non-draft Dependabot pull request; skipping."
-              continue
-            fi
+              if [ "$mergeable" = "CONFLICTING" ]; then
+                echo "    Merge conflict; skipping."
+                continue
+              fi
 
-            if ! wait_for_validation "$pr"; then
-              echo "    Checks not passing; skipping."
-              continue
-            fi
+              # Bind validation to this head and this workflow, not just a check name.
+              validation="$(gh api \
+                "repos/$GH_REPO/actions/workflows/PR-Validation.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
+                --jq ".workflow_runs | map(select(any(.pull_requests[]; .number == $pr))) | max_by(.run_number) | [.status // \"missing\", .conclusion // \"\"] | @tsv")"
+              IFS=$'\t' read -r status conclusion <<< "$validation"
 
-            head_sha="$(gh pr view "$pr" --json headRefOid --jq .headRefOid)"
+              case "$status:$conclusion" in
+                completed:success) ;;
+                completed:*)
+                  echo "    Validation $conclusion; skipping."
+                  continue
+                  ;;
+                *)
+                  echo "    Validation $status; will recheck after scanning the batch."
+                  pending=true
+                  continue
+                  ;;
+              esac
 
-            if GH_TOKEN="$MERGE_TOKEN" gh pr merge "$pr" --squash --match-head-commit "$head_sha"; then
-              merged=$((merged + 1))
+              if ! GH_TOKEN="$MERGE_TOKEN" gh pr merge "$pr" --squash --match-head-commit "$head_sha"; then
+                current="$(gh pr view "$pr" --json state,headRefOid,mergeable \
+                  --jq '[.state, .headRefOid, .mergeable] | @tsv')"
+                IFS=$'\t' read -r state current_sha mergeable <<< "$current"
+                if [ "$state" != "OPEN" ] || [ "$mergeable" = "CONFLICTING" ]; then
+                  echo "    PR closed or conflicting; skipping."
+                elif [ "$current_sha" != "$head_sha" ]; then
+                  echo "    Head changed; will validate the new head on the next scan."
+                  pending=true
+                else
+                  echo "::error::Merge failed for PR #$pr; refusing to publish after an unexpected error."
+                  exit 1
+                fi
+                continue
+              fi
 
               sha="$(gh api "repos/$GH_REPO/pulls/$pr" \
-                --jq '.merge_commit_sha // empty' 2>/dev/null || true)"
-              if [ -n "$sha" ] && [ "$sha" != "null" ]; then
-                merge_sha="$sha"
-                echo "    Merge commit: $merge_sha"
+                --jq 'select(.merged == true) | .merge_commit_sha // empty')"
+              if [ -z "$sha" ]; then
+                echo "::error::PR #$pr has not completed merging; refusing to publish an unconfirmed batch."
+                exit 1
               fi
-            else
-              echo "    Merge failed; skipping."
+
+              merged=$((merged + 1))
+              merge_sha="$sha"
+              echo "    Merge commit: $merge_sha"
+            done <<< "$prs"
+
+            if [ "$pending" = "false" ]; then
+              break
             fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::warning::Batch wait limit reached; pending PRs remain open for a later run."
+              break
+            fi
+            sleep 15
           done
 
           echo "    Merged $merged pull request(s)."
@@ -137,13 +135,6 @@ jobs:
 
   build:
     needs: merge
-    if: >-
-      always() &&
-      needs.merge.result != 'cancelled' &&
-      (needs.merge.outputs.merged_count != '0' ||
-       github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && github.event.inputs.pr == '') ||
-       github.event.inputs.force == 'true')
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -224,6 +215,7 @@ jobs:
         env:
           IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/syncplay-server
           FORCE: ${{ github.event.inputs.force }}
+          MERGED_COUNT: ${{ needs.merge.outputs.merged_count }}
           TARGET_SHA: ${{ steps.target.outputs.target_sha }}
           BUILD_SHA: ${{ steps.target.outputs.build_sha }}
           SYNCPLAY_SHA: ${{ steps.inputs.outputs.syncplay_sha }}
@@ -231,8 +223,8 @@ jobs:
           echo "==> Checking latest published image..."
 
           # Files that change the image content. Keep this list in sync with the
-          # Dockerfile: requirements.in is only the pip-compile manifest, and
-          # CI/README changes do not affect the image.
+          # Dockerfile: requirements.in is only the pip-compile manifest.
+          # Any PR merged in this batch also triggers a build, even for CI changes.
           BUILD_INPUTS="Dockerfile requirements.txt entrypoint.sh health.py"
 
           build=false
@@ -241,6 +233,9 @@ jobs:
           if [ "${FORCE:-false}" = "true" ]; then
             build=true
             reason="Force build requested."
+          elif [ "${MERGED_COUNT:-0}" -gt 0 ]; then
+            build=true
+            reason="Merged $MERGED_COUNT Dependabot pull request(s)."
           elif ! docker pull "$IMAGE:latest"; then
             build=true
             reason="No existing image found."

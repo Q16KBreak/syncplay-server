@@ -13,15 +13,9 @@ on:
       - synchronize
       - reopened
       - ready_for_review
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: "Pull request number to treat as a security update"
-        type: string
-        required: true
 
 concurrency:
-  group: security-update-trigger
+  group: security-update-trigger-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
@@ -33,22 +27,19 @@ permissions:
 jobs:
   trigger:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.user.login == 'dependabot[bot]' &&
-       github.event.pull_request.draft == false)
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
       - name: Fetch Dependabot metadata
-        if: github.event_name == 'pull_request_target'
         id: metadata
         uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Classify update
-        if: github.event_name == 'pull_request_target'
         id: classify
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -90,16 +81,10 @@ jobs:
           echo "security=$security" >> "$GITHUB_OUTPUT"
 
       - name: Trigger merge and build
+        if: steps.classify.outputs.security == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr }}
-          SECURITY: ${{ steps.classify.outputs.security }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$SECURITY" = "true" ]; then
-            echo "==> Dispatching Update-Build-Publish for pull request #$PR_NUMBER..."
-            gh workflow run Update-Build-Publish.yml --ref master -f "pr=$PR_NUMBER"
-          else
-            echo "==> Version update; the daily run will merge it."
-          fi
+          echo "==> Security update detected; dispatching the full Dependabot batch..."
+          gh workflow run Update-Build-Publish.yml --ref master
