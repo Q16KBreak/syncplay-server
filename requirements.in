@@ -1,6 +1,6 @@
 # 基于 https://github.com/Syncplay/syncplay/blob/master/requirements.txt
 # 仅保留 Linux 镜像需要的依赖，上游中仅 darwin/win32 使用的条目已省略。
 # Dependabot 基于本文件维护 requirements.txt（pip-compile 产物）
-certifi>=2018.11.29
+certifi>=2026.11.20
 pem>=21.2.0
 twisted[tls]>=16.4.0
